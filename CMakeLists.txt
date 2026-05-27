@@ -30,6 +30,8 @@ find_package(Qt${QT_VERSION_MAJOR} COMPONENTS Widgets REQUIRED)
 if(ANDROID)
   add_library(protocolShaper SHARED
     main.cpp
+    xmltoh.cpp
+    xmltoh.h
     mainwindow.cpp
     mainwindow.h
     mainwindow.ui
@@ -37,6 +39,8 @@ if(ANDROID)
 else()
   add_executable(protocolShaper
     main.cpp
+    xmltoh.cpp
+    xmltoh.h
     mainwindow.cpp
     mainwindow.h
     mainwindow.ui
