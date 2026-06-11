@@ -1,6 +1,8 @@
 #include "mainwindow.h"
 #include "xmltoh.h"
+#include "htodocx.h"
 #include "./ui_mainwindow.h"
+
 
 QString lastUsedPath = QDir::homePath();
 
@@ -22,7 +24,7 @@ void MainWindow::on_addFileButton_clicked()
                 this,
                 "Выберите файл",
                 lastUsedPath,
-                "XML (*.xml)"
+                "XML (*.xml);;Заголовочный (*.h)"
                 );
 
     if (inFile.isEmpty())
@@ -37,7 +39,7 @@ void MainWindow::on_addFileButton_clicked()
         ui->textEdit->insertPlainText("\n" + inFile);
 }
 
-void MainWindow::on_converteFileButton_clicked()
+void MainWindow::on_converteFileToHButton_clicked()
 {
     if (ui->textEdit->toPlainText().isEmpty())
     {
@@ -66,7 +68,7 @@ void MainWindow::on_converteFileButton_clicked()
         QString baseName = inFileInfo.baseName();
         QString outFilePath = outDir + "/" + baseName + ".h";
 
-        if (!ConverteXMLtoH(inFilePath, outFilePath))
+        if (!ConvertXMLtoH(inFilePath, outFilePath))
             QMessageBox::warning(this, "Warning", "Не удалось конвертировать файл:\n " + inFilePath);
     }
     QMessageBox::information(this, "Info", "Все файлы конвертированы");
@@ -87,4 +89,41 @@ void MainWindow::on_deleteFileButton_clicked()
 void MainWindow::on_deleteAllFileButton_clicked()
 {
     ui->textEdit->clear();
+}
+
+void MainWindow::on_converteFileToDocxButton_clicked()
+{
+    if (ui->textEdit->toPlainText().isEmpty())
+    {
+        QMessageBox::information(this, "Info", "Ни один файл не выбран");
+        return;
+    }
+
+    QString outDir = QFileDialog::getExistingDirectory(
+                this,
+                "Выберите папку для сохранения",
+                lastUsedPath
+                );
+
+    if (outDir.isEmpty())
+    {
+        return;
+    }
+
+    lastUsedPath = outDir;
+
+    QStringList inFilePaths = ui->textEdit->toPlainText().split("\n");
+    QAxObject* word = new QAxObject("Word.Application", this);
+
+    foreach (QString inFilePath, inFilePaths)
+    {
+        QFileInfo inFileInfo(inFilePath);
+        QString baseName = inFileInfo.baseName();
+        QString outFilePath = outDir + "/" + baseName + ".docx";
+
+        if (!ConvertHtoDOCX(word, inFilePath, outFilePath))
+            QMessageBox::warning(this, "Warning", "Не удалось конвертировать файл:\n " + inFilePath);
+    }
+    QMessageBox::information(this, "Info", "Все файлы конвертированы");
+    word->dynamicCall("Quit()");
 }

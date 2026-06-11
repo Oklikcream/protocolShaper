@@ -1,53 +1,109 @@
 #include "xmltoh.h"
 #include <QFile>
 #include <QXmlStreamReader>
-#include <QTextStream>
 #include <QDebug>
-#include <QMap>
-#include <QList>
+#include <QFileInfo>
 
-QString makeFieldComment(const Field &f, const QString &endian) {
+// Разбор XML файла
+QList<XmlPacket> ParseXML(const QString &inFilePath) {
+    QFile xmlFile(inFilePath);
+    if (!xmlFile.open(QIODevice::ReadOnly)) {
+        throw std::runtime_error(
+            QString("Не удалось открыть файл %1").arg(inFilePath).toStdString()
+        );
+    }
 
-    QString comment = "// " + f.name + "; ";
-    comment += f.dimension + "; ";
-    comment += QString::number(f.lsb) + "; ";
+    QXmlStreamReader xml(&xmlFile);
+    QList<XmlPacket> packets;
+    QString currentDirection;
 
-    if (!f.enumValues.isEmpty()) {
-        for (auto values = f.enumValues.begin(); values != f.enumValues.end(); ++values) {
-            comment += values.key() + "=" + QString::number(values.value()) + " ";
+    while (!xml.atEnd() && !xml.hasError()) {
+        QXmlStreamReader::TokenType token = xml.readNext();
+        if (token != QXmlStreamReader::StartElement) {
+            continue;
         }
-        comment += "; ";
-    } else {
-        comment += "; ";
+
+        if (xml.name() == "Type") {
+            currentDirection = xml.attributes().value("name").toString();
+        } else if (xml.name() == "Packet") {
+            XmlPacket pkt;
+            pkt.direction = currentDirection;
+            pkt.name = xml.attributes().value("name").toString();
+            pkt.endian = xml.attributes().value("endian").toString();
+
+            // Выделяем пакеты
+            while (!(xml.tokenType() == QXmlStreamReader::EndElement && xml.name() == "Packet")) {
+                xml.readNext();
+                // Группы
+                if (xml.tokenType() == QXmlStreamReader::StartElement && xml.name() == "Group") {
+                    XmlGroup grp;
+                    grp.lengthBytes = xml.attributes().value("length").toInt();
+                    while (!(xml.tokenType() == QXmlStreamReader::EndElement && xml.name() == "Group")) {
+                        xml.readNext();
+                        // Поля групп
+                        if (xml.tokenType() == QXmlStreamReader::StartElement && xml.name() == "Field") {
+                            XmlField f;
+                            QStringList fullName = xml.attributes().value("name").toString().split(", ");
+                            f.name = fullName.value(0);
+                            if (fullName.size() == 2)
+                                f.dimension = fullName.at(1);
+
+                            QString typeStr = xml.attributes().value("type").toString();
+                            if (typeStr == "unsigned" || typeStr == "signed" || typeStr == "float" || typeStr == "double")
+                                f.type = typeStr;
+                            else
+                                throw std::runtime_error(
+                                    QString("Неизвестный тип данных: ").arg(typeStr).toStdString()
+                                );
+
+                            f.lengthBits = xml.attributes().value("length").toInt();
+                            f.lsb = xml.attributes().value("lsb").toDouble();
+                            f.constant = (xml.attributes().value("constant") == "true");
+                            f.constValue = xml.attributes().value("value").toULongLong();
+                            f.script = xml.attributes().value("script").toString();
+                            while (xml.readNextStartElement()) {
+                                if (xml.name() == "Values") {
+                                    QString valName = xml.attributes().value("name").toString();
+                                    quint64 val = xml.attributes().value("value").toULongLong();
+                                    f.enumValues[valName] = val;
+                                }
+                                xml.skipCurrentElement();
+                            }
+                            grp.fields.append(f);
+                        }
+                    }
+                    pkt.groups.append(grp);
+                }
+            }
+            packets.append(pkt);
+        }
     }
 
-    comment += endian + "; ";
-
-    if (f.constant)
-        comment += "константа = " + QString::number(f.constValue);
-    if (!f.script.isEmpty())
-    {
-        if (f.constant)
-            comment += ", ";
-        comment += "CRC script: " + f.script;
+    if (xml.hasError()) {
+        throw std::runtime_error(
+            QString("Ошибка XML: %1").arg(xml.errorString()).toStdString()
+        );
     }
-    comment += + "; ";
 
-    return comment;
+    xmlFile.close();
+    return packets;
 }
 
-void writePacket(const Packet &pkt, int packetIndex, QTextStream &out) {
+// Запись пакета в файл
+void WritePacket(const XmlPacket &pkt, int packetIndex, QTextStream &out) {
     QString structName = (pkt.direction == "Прием" ? "Rx_" : "Tx_") + QString("Packet%1").arg(packetIndex);
     out << "#pragma pack(1)\n";
     out << "typedef struct {\n";
 
     int fieldCounter = 0;
     int groupCounter = 0;
-    for (int i = 0; i < pkt.groups.size(); ++i) {
-        const Group &grp = pkt.groups[i];
+    int groupFieldCounter = 0;
+
+    for (const XmlGroup &grp : pkt.groups) {
         bool isBitfieldGroup = true;
         int totalBits = 0;
-        for (const Field &f : grp.fields) {
+
+        for (const XmlField &f : grp.fields) {
             if (f.type == "float" || f.type == "double") {
                 isBitfieldGroup = false;
                 break;
@@ -55,24 +111,32 @@ void writePacket(const Packet &pkt, int packetIndex, QTextStream &out) {
             totalBits += f.lengthBits;
         }
 
+        // Запись объединения
         if (isBitfieldGroup && grp.fields.size() > 1 && totalBits <= 64) {
-            QString groupStructName = structName + "_group" + QString::number(i+1);
+            QString groupType;
+            if (totalBits <= 8) groupType = "quint8";
+            else if (totalBits <= 16) groupType = "quint16";
+            else if (totalBits <= 32) groupType = "quint32";
+            else groupType = "quint64";
+
             out << "    typedef union {\n";
-            out << "        " << (totalBits <= 32 ? "quint32" : "quint64") << " raw;\n";
+            out << "        " << groupType << " raw;\n";
             out << "        struct {\n";
-            int bitOffset = 0;
-            for (const Field &f : grp.fields) {
-                QString baseType = (f.type == "signed") ? "qint" : "quint";
-                baseType += QString::number(f.lengthBits);
-                out << "            " << baseType << " field" << ++fieldCounter << " : " << f.lengthBits << ";";
-                out << " " << makeFieldComment(f, pkt.endian) << "\n";
-                bitOffset += f.lengthBits;
+
+            // Запись битового поля объединения
+            for (const XmlField &f : grp.fields) {
+                out << "            " << groupType << " groupField"
+                    << ++groupFieldCounter << " : " << f.lengthBits << ";"
+                    << " " << MakeFieldComment(f, pkt.endian) << "\n";
             }
             out << "        } fields;\n";
             out << "    } group" << ++groupCounter << ";\n";
-            out << "    group" << groupCounter << " group" << i+1 << ";\n";
-        } else {
-            for (const Field &f : grp.fields) {
+            out << "    group" << groupCounter << " field" << ++fieldCounter << ";\n";
+            groupFieldCounter = 0;
+        }
+        // Запись обычного поля
+        else {
+            for (const XmlField &f : grp.fields) {
                 QString cType;
                 if (f.type == "unsigned") {
                     if (f.lengthBits <= 8) cType = "quint8";
@@ -91,109 +155,81 @@ void writePacket(const Packet &pkt, int packetIndex, QTextStream &out) {
                 } else {
                     cType = "quint" + QString::number(f.lengthBits);
                 }
-                out << "    " << cType << " field" << ++fieldCounter << ";";
-                out << " " << makeFieldComment(f, pkt.endian) << "\n";
+                out << "    " << cType << " field" << ++fieldCounter << "; ";
+                out << MakeFieldComment(f, pkt.endian) << "\n";
             }
         }
     }
+
     out << "} " << structName << ";\n";
     out << "#pragma pack()\n\n";
 }
 
-bool ConverteXMLtoH(QString inFilePatch, QString outFilePatch) {
-    QFile xmlFile(inFilePatch);
-    if (!xmlFile.open(QIODevice::ReadOnly)) {
-        qCritical() << "Не удалось открыть файл " << inFilePatch;
-        return 0;
-    }
+// Создание комментария
+QString MakeFieldComment(const XmlField &f, const QString &endian) {
+    // Имя, размерность, цмр
+    QString comment = QString("// %1; %2; %3; ").arg(f.name, f.dimension).arg(f.lsb);
 
-    QXmlStreamReader xml(&xmlFile);
-    QList<Packet> packets;
-    QString currentDirection;
-
-    while (!xml.atEnd() && !xml.hasError()) {
-        QXmlStreamReader::TokenType token = xml.readNext();
-        if (token == QXmlStreamReader::StartElement) {
-            if (xml.name() == "Type") {
-                currentDirection = xml.attributes().value("name").toString();
-            } else if (xml.name() == "Packet") {
-                Packet pkt;
-                pkt.direction = currentDirection;
-                pkt.name = xml.attributes().value("name").toString();
-                pkt.endian = xml.attributes().value("endian").toString();
-                while (!(xml.tokenType() == QXmlStreamReader::EndElement && xml.name() == "Packet")) {
-                    xml.readNext();
-                    if (xml.tokenType() == QXmlStreamReader::StartElement && xml.name() == "Group") {
-                        Group grp;
-                        grp.lengthBytes = xml.attributes().value("length").toInt();
-                        while (!(xml.tokenType() == QXmlStreamReader::EndElement && xml.name() == "Group")) {
-                            xml.readNext();
-                            if (xml.tokenType() == QXmlStreamReader::StartElement && xml.name() == "Field") {
-                                Field f;
-                                QStringList fullName = xml.attributes().value("name").toString().split(", ");
-                                f.name = fullName[0];
-                                if (fullName.size() == 2)
-                                    f.dimension = fullName[1];
-                                QString typeStr = xml.attributes().value("type").toString();
-                                if (typeStr == "unsigned")
-                                    f.type = "unsigned";
-                                else if (typeStr == "signed")
-                                    f.type = "signed";
-                                else if (typeStr == "float")
-                                    f.type = "float";
-                                else if (typeStr == "double")
-                                    f.type = "double";
-                                f.lengthBits = xml.attributes().value("length").toInt();
-                                f.lsb = xml.attributes().value("lsb").toDouble();
-                                f.constant = (xml.attributes().value("constant") == "true");
-                                f.constValue = xml.attributes().value("value").toULongLong();
-                                f.script = xml.attributes().value("script").toString();
-                                while (xml.readNextStartElement()) {
-                                    if (xml.name() == "Values") {
-                                        QString valName = xml.attributes().value("name").toString();
-                                        quint64 val = xml.attributes().value("value").toULongLong();
-                                        f.enumValues[valName] = val;
-                                    }
-                                    xml.skipCurrentElement();
-                                }
-                                grp.fields.append(f);
-                            }
-                        }
-                        pkt.groups.append(grp);
-                    }
-                }
-                packets.append(pkt);
-            }
+    // Значения
+    if (!f.enumValues.isEmpty()) {
+        QStringList items;
+        for (auto it = f.enumValues.begin(); it != f.enumValues.cend(); ++it) {
+            items << QString("%1=%2").arg(it.key()).arg(it.value());
         }
+        comment += items.join(", ");
     }
 
-    if (xml.hasError()) {
-        qCritical() << "Ошибка XML:" << xml.errorString();
-        return 0;
-    }
-    xmlFile.close();
+    // Направление байт
+    comment += QString("; %1; ").arg(endian);
 
-    QFile outFile(outFilePatch);
+    // Примечание
+    if (f.constant)
+        comment += QString("константа=%1").arg(f.constValue);
+    if (!f.script.isEmpty())
+    {
+        if (f.constant)
+            comment += ", ";
+        comment += "script=" + f.script;
+    }
+    comment += + ";";
+
+    return comment;
+}
+
+bool ConvertXMLtoH(const QString &inFilePath,const QString &outFilePath) {
+
+    QList<XmlPacket> packets;
+    try {
+        packets = ParseXML(inFilePath);
+    } catch (const std::exception &e) {
+        qCritical() << e.what();
+        return false;
+    }
+
+    QFile outFile(outFilePath);
     if (!outFile.open(QIODevice::WriteOnly)) {
-        qCritical() << "Не удалось записать в файл " << outFilePatch;
-        return 0;
+        qCritical() << "Не удалось записать в файл " << outFilePath;
+        return false;
     }
+
+    QFileInfo fileInfo(inFilePath);
+    QString baseName = fileInfo.baseName().toUpper().replace(' ', '_');
+
     QTextStream out(&outFile);
-    out << "#ifndef PROTOCOL_GENERATED_H\n";
-    out << "#define PROTOCOL_GENERATED_H\n\n";
-
-
+    out << QString("#ifndef %1_H\n").arg(baseName);
+    out << QString("#define %1_H\n\n").arg(baseName);
     out << "#include \"qglobal.h\"\n";
     out << "#include <QByteArray>\n\n";
 
     int pktIndex = 0;
-    for (const Packet &pkt : packets) {
-        writePacket(pkt, ++pktIndex, out);
+    for (const XmlPacket &pkt : packets) {
+        WritePacket(pkt, ++pktIndex, out);
     }
 
-    out << "#endif // PROTOCOL_GENERATED_H\n";
+    out << QString("#endif // %1_H\n").arg(baseName);
     out.flush();
     outFile.close();
 
-    return 1;
+    return true;
 }
+

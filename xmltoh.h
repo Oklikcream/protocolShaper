@@ -5,11 +5,11 @@
 #include <QMap>
 #include <QList>
 
-struct Field {
+struct XmlField {
     QString name;                       // Имя переменной
     QString dimension;                  // Размерность
     QString type;                       // Тип переменной
-    int lengthBits;                     // Длина байт
+    int lengthBits;                     // Длина бит
     double lsb;                         // ЦМР
     bool constant;                      // Константность
     quint64 constValue;                 // Значение константы
@@ -17,20 +17,23 @@ struct Field {
     QString script;                     // Скрипт
 };
 
-struct Group {
+struct XmlGroup {
     int lengthBytes;                    // Длина байт
-    QList<Field> fields;                // Поля
+    QList<XmlField> fields;                // Поля
 };
 
-struct Packet {
+struct XmlPacket {
     QString name;                       // Имя пакета
     QString direction;                  // Направление пакета
-    QString endian;                     // Направленеи байт
-    QList<Group> groups;                // Группы
+    QString endian;                     // Направление байт
+    QList<XmlGroup> groups;                // Группы
 };
 
-QString makeFieldComment(const Field &f, const QString &endian);
-void writePacket(const Packet &pkt, int packetIndex, QTextStream &out);
-bool ConverteXMLtoH(QString inFilePatch, QString outFilePatch);
+QList<XmlPacket> ParseXML(const QString &inFilePatch);
+void WritePacket(const XmlPacket &pkt, int packetIndex, QTextStream &out);
+QString MakeFieldComment(const XmlField &f, const QString &endian);
+bool ConvertXMLtoH(const QString &inFilePatch, const QString &outFilePatch);
+
+
 
 #endif // XMLTOH_H

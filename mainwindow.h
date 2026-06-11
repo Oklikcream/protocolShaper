@@ -20,11 +20,13 @@ public:
 private slots:
     void on_addFileButton_clicked();
 
-    void on_converteFileButton_clicked();
+    void on_converteFileToHButton_clicked();
 
     void on_deleteFileButton_clicked();
 
     void on_deleteAllFileButton_clicked();
+
+    void on_converteFileToDocxButton_clicked();
 
 private:
     Ui::MainWindow *ui;
